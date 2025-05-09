@@ -21,12 +21,10 @@ GET `/query` – Returns total elapsed time for a given event ID
 **Amazon Timestream**
 
 Stores event records with millisecond timestamps, organized by event ID and type.
-*Amazon SQS (Dead Letter Queue)
+
+**Amazon SQS (Dead Letter Queue)**
+
 Captures failed Lambda invocations for diagnostics and retry handling.
-
-**SQS DLQ**
-
-Captures failed invocations from the Lambda functions.
 
 **IAM Role**
 
@@ -45,12 +43,12 @@ Grants the Lambda functions least-privilege access to Timestream, SQS, logs, and
 
    ```bash
    aws cloudformation deploy \
-     --template-file event-tracking.yaml \
+     --template-file logging.yaml \
      --stack-name event-tracking-service \
      --capabilities CAPABILITY_NAMED_IAM
     ```
 
-Replace `event-tracking.yaml` with the file pathof your CloudFormation template. 
+Replace `logging.yaml` with the file path of your CloudFormation template. 
 
 - **Using AWS Console**
 
@@ -72,18 +70,18 @@ Replace `event-tracking.yaml` with the file pathof your CloudFormation template.
 
 ```curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/prod/event \
   -H "Content-Type: application/json" \
-  --data '{"event_id": "123", "event_type": "start"}'
+  --data '{"event_id": "you-event-id", "event_type": "start"}'
 ```
 
 **Query Elapsed Time**
 
 ```
-curl "https://<api-id>.execute-api.<region>.amazonaws.com/prod/query?event_id=123"
+curl "https://<api-id>.execute-api.<region>.amazonaws.com/prod/query?event_id=<your-event-id>"
 ```
 
 ## Cleanup
 
-To remove the AWS CloudFormation Stacks along with the AWS Resources created, navigate to the CloudFormation console and delete the stack. 
+To remove the AWS CloudFormation Stack along with the AWS Resources created, navigate to the CloudFormation console and delete the stack. 
 
 ## Security
 
