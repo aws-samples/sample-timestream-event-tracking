@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template for Event Tracking Service
+Resources:
+  # Timestream Database
+  EventTrackingDB:
+    Type: AWS::Timestream::Database
+    Properties:
+      DatabaseName: event-tracking-db
+  # Timestream Table
+  EventTrackingTable:
+    Type: AWS::Timestream::Table
+    Properties:
+      TableName: event-tracking-table
+      DatabaseName: !Ref EventTrackingDB
+      RetentionProperties:
+        MemoryStoreRetentionPeriodInHours: "24"
+        MagneticStoreRetentionPeriodInDays: "7"
+  # IAM Role for Lambda
+  EventTrackingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonTimestreamFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+ #Dead letter Queue for Lambda
+  EventDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: EventDLQ
+      KmsMasterKeyId: alias/aws/sqs  # Or use !Ref MyKmsKey for a custom key
+ # Lambda Function to Record Events
+  EventTrackingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EventTrackingLambda
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn: !GetAtt EventDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-xxxxxxx #Replace with your security group ID(s)
+        SubnetIds:
+          - subnet-xxxxxxx #Replace with your private subnet ID(s)
+          - subnet-xxxxxxx #Replace with your private subnet ID(s)
+      Role: !GetAtt EventTrackingLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+          timestream = boto3.client('timestream-write')
+          DB_NAME = "event-tracking-db"
+          TABLE_NAME = "event-tracking-table"
+          def lambda_handler(event, context):
+              body = json.loads(event['body'])
+              event_id = body.get("event_id")
+              event_type = body.get("event_type")
+              timestamp = int(datetime.utcnow().timestamp() * 1000)
+              if event_type not in ["start", "stop"]:
+                  return {"statusCode": 400, "body": json.dumps("Invalid event type")}
+              record = {
+                  "Dimensions": [{"Name": "event_id", "Value": str(event_id)}],
+                  "MeasureName": event_type,
+                  "MeasureValue": str(timestamp),
+                  "MeasureValueType": "BIGINT",
+                  "Time": str(timestamp)
+              }
+              timestream.write_records(DatabaseName=DB_NAME, TableName=TABLE_NAME, Records=[record])
+              return {"statusCode": 200, "body": json.dumps("Event recorded")}
+  # Lambda Function to Query Event Time
+  EventQueryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: EventQueryLambda
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      ReservedConcurrentExecutions: 10
+      DeadLetterConfig:
+        TargetArn: !GetAtt EventDLQ.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-xxxxxxx #Replace with your security group ID(s)
+        SubnetIds:
+          - subnet-xxxxxxx  #Replace with your private subnet ID(s)
+          - subnet-xxxxxxx  #Replace with your private subnet ID(s)
+      Role: !GetAtt EventTrackingLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          logging.basicConfig()
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          timestream_query = boto3.client('timestream-query')
+          DB_NAME = "event-tracking-db"
+          TABLE_NAME = "event-tracking-table"
+          def lambda_handler(event, context):
+              logger.info("Incoming event: %s", json.dumps(event))
+              try:
+                  query_params = event.get("queryStringParameters") or {}
+                  event_id = query_params.get("event_id")
+                  if not event_id:
+                      return {
+                          "statusCode": 400,
+                          "body": json.dumps("Missing event_id in query string")
+                      }
+                  query = f"""
+                      SELECT measure_name, measure_value::bigint AS event_time, time
+                      FROM "{DB_NAME}"."{TABLE_NAME}"
+                      WHERE time > ago(30d)
+                        AND measure_name IN ('start', 'stop')
+                        AND event_id = '{event_id}'
+                      ORDER BY time ASC
+                  """
+                  logger.info("Running Timestream query: %s", query)
+                  response = timestream_query.query(QueryString=query)
+                  records = response.get("Rows", [])
+                  event_history = []
+                  start_time = None
+                  total_elapsed_time = 0
+                  for row in records:
+                      event_type = row["Data"][0]["ScalarValue"]
+                      timestamp = int(row["Data"][1]["ScalarValue"])
+                      event_history.append({
+                          "event_type": event_type,
+                          "timestamp": timestamp
+                      })
+                      if event_type == "start":
+                          start_time = timestamp
+                      elif event_type == "stop" and start_time:
+                          elapsed_time = timestamp - start_time
+                          total_elapsed_time += elapsed_time
+                          start_time = None
+                  result = {
+                      "event_id": event_id,
+                      "total_elapsed_time_ms": total_elapsed_time,
+                      "event_history": event_history
+                  }
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps(result)
+                  }
+              except Exception as e:
+                  logger.exception("Query failed")
+                  return {
+                      "statusCode": 500,
+                      "body": json.dumps(f"Internal error: {str(e)}")
+                  }
+  # API Gateway
+  EventTrackingApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: EventTrackingApi
+      Description: API for logging and querying event durations
+  # API Gateway Resource for Logging Events
+  EventTrackingResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventTrackingApi
+      ParentId: !GetAtt 
+        - EventTrackingApi
+        - RootResourceId
+      PathPart: "event"
+  EventQueryResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref EventTrackingApi
+      ParentId: !GetAtt 
+        - EventTrackingApi
+        - RootResourceId
+      PathPart: "query"
+  # API Method for Logging Events
+  EventTrackingMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventTrackingApi
+      ResourceId: !Ref EventTrackingResource
+      HttpMethod: "POST"
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EventTrackingLambda.Arn}/invocations"
+  # API Method for Querying Events
+  EventQueryMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref EventTrackingApi
+      ResourceId: !Ref EventQueryResource
+      HttpMethod: "GET"
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: "POST"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EventQueryLambda.Arn}/invocations"
+  # Lambda Invoke Permissions
+  LambdaApiPermissionEvent:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref EventTrackingLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventTrackingApi}/*/POST/event"
+  LambdaApiPermissionQuery:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref EventQueryLambda
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EventTrackingApi}/*/GET/query"
+Outputs:
+  LogApiEndpoint:
+    Description: API Gateway endpoint to log events
+    Value: !Sub "https://${EventTrackingApi}.execute-api.${AWS::Region}.amazonaws.com/prod/event"
+  QueryApiEndpoint:
+    Description: API Gateway endpoint for querying event durations
+    Value: !Sub "https://${EventTrackingApi}.execute-api.${AWS::Region}.amazonaws.com/prod/query"
