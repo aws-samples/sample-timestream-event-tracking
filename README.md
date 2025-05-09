@@ -7,7 +7,9 @@ This CloudFormation template provisions a serverless event tracking system. The 
 ## Template Resources
 
 **API Gateway**
+
 POST `/event` – Logs a start or stop event
+
 GET `/query` – Returns total elapsed time for a given event ID
 
 **Lambda Functions**
@@ -81,7 +83,7 @@ curl "https://<api-id>.execute-api.<region>.amazonaws.com/prod/query?event_id=12
 
 ## Cleanup
 
-To remove the AWS CloudFormation Stacks along with the AWS Resources they create, run navigate to the CloudFormation console and delete the stack. 
+To remove the AWS CloudFormation Stacks along with the AWS Resources created, navigate to the CloudFormation console and delete the stack. 
 
 ## Security
 
